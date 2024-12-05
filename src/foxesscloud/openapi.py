@@ -1318,6 +1318,8 @@ def get_history(time_span='hour', d=None, v=None, summary=1, save=None, load=Non
         input_result = deepcopy(result[v.index('generationPower')])
         input_result['name'] = input_name
         for y in input_result['data']:
+            if isinstance(y['value'], str):
+                y['value'] = float(y['value'])
             y['value'] = -y['value'] if y['value'] < 0.0 else 0.0
         result.append(input_result)
     for var in result:
