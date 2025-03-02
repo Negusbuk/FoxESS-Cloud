@@ -1,7 +1,7 @@
 ##################################################################################################
 """
 Module:   Fox ESS Cloud using Open API
-Updated:  23 November 2024
+Updated:  11 January 2025
 By:       Tony Matthews
 """
 ##################################################################################################
@@ -10,7 +10,7 @@ By:       Tony Matthews
 # ALL RIGHTS ARE RESERVED © Tony Matthews 2024
 ##################################################################################################
 
-version = "2.7.2"
+version = "2.7.7"
 print(f"FoxESS-Cloud Open API version {version}")
 
 debug_setting = 1
@@ -419,7 +419,7 @@ device_list = None
 device = None
 device_sn = None
 
-def get_device(sn=None):
+def get_device(sn=None, device_type=None):
     global device_list, device, device_sn, battery, debug_setting, schedule, remote_settings
     if get_vars() is None:
         return None
@@ -480,30 +480,34 @@ def get_device(sn=None):
     get_generation()
 #    remote_settings = get_ui()
     # parse the model code to work out attributes
-    model_code = device['deviceType'].upper()
-    # first 2 letters / numbers e.g. H1, H3, KH
-    if model_code[:2] == 'KH':
+    model_code = device['deviceType'].upper() if device_type is None else device_type
+    if model_code[0] in 'FGRST':
+        phase = '1' if model_code[0] in 'FGS' else '3'
+        model_code = model_code[0] + phase + '-' + model_code[1:]
+    elif model_code[:2] == 'KH':
         model_code = 'KH-' + model_code[2:]
     elif model_code[:4] == 'AIO-':
         model_code = 'AIO' + model_code[4:]
-    device['eps'] = 'E' in model_code
+    device['eps'] = 'E' in model_code[2:]
     parts = model_code.split('-')
     model = parts[0]
-    if model not in ['KH', 'H1', 'AC1', 'H3', 'AC3', 'AIOH1', 'AIOH3']:
+    if model not in ['F1', 'G1', 'R3', 'S1', 'T3', 'KH', 'H1', 'AC1', 'H3', 'AC3', 'AIOH1', 'AIOH3']:
         output(f"** device model not recognised for deviceType: {device['deviceType']}")
         return device
     device['model'] = model
     device['phase'] = 3 if model[-1:] == '3' else 1
     for p in parts[1:]:
         if p.replace('.','').isnumeric():
-            power = float(p)
-            if power >= 1.0 and power < 20.0:
-                device['power'] = float(p)
+            power = float(p)  / (1000 if model in ['F1', 'S1'] else 1.0)
+            if power >= 0.5 and power < 100.0:
+                device['power'] = power
             break
     if device.get('power') is None:
         output(f"** device power not found for deviceType: {device['deviceType']}")
     # set max charge current
-    if model in ['KH']:
+    if model in ['F1', 'G1', 'R3', 'S1', 'T3']:
+        device['max_charge_current'] = None
+    elif model in ['KH']:
         device['max_charge_current'] = 50
     elif model in ['H1', 'AC1']:
         device['max_charge_current'] = 35
@@ -693,7 +697,8 @@ def set_charge(ch1=True, st1=0, en1=0, ch2=True, st2=0, en2=0, force = 0, enable
         battery_settings['times']['enable2']    = False
         battery_settings['times']['startTime2'] = {'hour': 0, 'minute': 0}
         battery_settings['times']['endTime2']   = {'hour': 0, 'minute': 0}
-    if get_flag().get('enable') == 1:
+    flag = get_flag()
+    if flag is not None and flag.get('enable') == 1:
         if force == 0:
             output(f"** set_charge(): cannot set charge when a schedule is enabled")
             return None
@@ -838,7 +843,7 @@ def get_settings():
 named_settings = {}
 
 def get_remote_settings(name):
-    global device_sn, debug_setting, messages, name_data
+    global device_sn, debug_setting, messages, name_data, named_settings
     if get_device() is None:
         return None
     output(f"getting remote settings", 2)
@@ -874,7 +879,7 @@ def get_named_settings(name):
     return get_remote_settings(name)
 
 def set_named_settings(name, value, force=0):
-    global device_sn, debug_setting
+    global device_sn, debug_setting, named_settings
     if get_device() is None:
         return None
     if force == 1 and get_schedule().get('enable'):
@@ -884,6 +889,10 @@ def set_named_settings(name, value, force=0):
         for (n, v) in name:
             result.append(set_named_settings(name=n, value=v))
         return result
+    if named_settings.get(name) is None:
+        result = get_named_settings(name)
+        if result is None:
+            return None
     output(f"\nSetting {name} to {value}", 1)
     body = {'sn': device_sn, 'key': name, 'value': f"{value}"}
     setting_delay()
@@ -897,8 +906,9 @@ def set_named_settings(name, value, force=0):
             output(f"** cannot update {name} when schedule is active")
         else:
             output(f"** set_named_settings(): ({name}, {value}) {errno_message(response)}")
-        return 0
-    return 1
+        return None
+    named_settings[name]['value'] = f"{value}"
+    return value
 
 ##################################################################################################
 # wrappers for named settings
@@ -1002,7 +1012,6 @@ def get_flag():
         return None
     result = response.json().get('result')
     if result is None:
-        output(f"** get_flag(), no result data, {errno_message(response)}")
         return None
     if schedule is None:
         schedule = {'enable': None, 'support': None, 'periods': None}
@@ -1479,7 +1488,7 @@ def report_value_profile(result):
     current_total = sum(by_hour)
     result = []
     for t in range(0, 24):
-        result.append(by_hour[t] * daily_average / current_total)
+        result.append(by_hour[t] * daily_average / current_total if current_total != 0.0 else 0.0)
     return (daily_average, result)
 
 # rescale history data based on time and steps
@@ -2045,7 +2054,7 @@ custom_periods = {'name': 'Custom',
     }
 
 tariff_list = [octopus_flux, intelligent_octopus, octopus_cosy, octopus_go, agile_octopus, bg_driver, eon_drive, economy_7, custom_periods]
-tariff = octopus_flux
+tariff = None
 
 ##################################################################################################
 # Strategy - schedule templates
@@ -2729,7 +2738,7 @@ def charge_needed(forecast=None, update_settings=0, timed_mode=None, show_data=N
         output(f"full_charge = {full_charge}")
     if test_soc is not None:
         current_soc = test_soc
-        capacity = 14.43
+        capacity = 14.36
         residual = test_soc * capacity / 100
         bat_volt = 317.4
         bat_power = 0.0
@@ -3522,18 +3531,19 @@ integrate_load_power = 0
 ##################################################################################################
 
 # get pvoutput data for upload to pvoutput api or via Bulk Loader
-# tou: 0 = no time of use, 1 = use time of use periods if available
+# tou: 0 = no time of use, 1 = use time of use periods if available, 2 = integrate all values
 
 def get_pvoutput(d = None, tou = 0):
     global tariff, pv_calibration, ct2_calibration, integrate_load_power
     if d is None:
         d = date_list()[0]
-    tou = 0 if tariff is None else 1 if tou == 1 or tou == True else 0
     if type(d) is list:
         print(f"---------------- get_pvoutput ------------------")
         print(f"Date range {d[0]} to {d[-1]} has {len(d)} days")
         if tou == 1:
             print(f"Time of use: {tariff['name']}")
+        elif tou == 2:
+            print(f"All values integrated from power")
         if integrate_load_power == 1:
             print(f"Consumption integrated from Load Power")
         print(f"------------------------------------------------")
@@ -3547,12 +3557,15 @@ def get_pvoutput(d = None, tou = 0):
     v = ['feedin', 'gridConsumption']
     if integrate_load_power == 0:
         v.append('loads')
-    report_data = get_report('day', d=d, v=v, summary=2)
-    if report_data is None:
-        return None
+    if tou == 2:
+        report_data = []
+    else:
+        report_data = get_report('day', d=d, v=v, summary=2)
+        if report_data is None:
+            return None
     # get raw power data for the day
-    v = ['pvPower', 'meterPower2', 'feedinPower', 'gridConsumptionPower'] if tou == 1 else ['pvPower', 'meterPower2']
-    if integrate_load_power == 1:
+    v = ['pvPower', 'meterPower2', 'feedinPower', 'gridConsumptionPower'] if tou > 0 else ['pvPower', 'meterPower2']
+    if integrate_load_power == 1 or tou == 2:
         v.append('loadsPower')
     raw_data = get_raw('day', d=d + ' 00:00:00', v=v , summary=1)
     if raw_data is None or len(raw_data) == 0 or raw_data[0].get('kwh') is None or raw_data[0].get('max') is None:
@@ -3582,7 +3595,7 @@ def get_pvoutput(d = None, tou = 0):
     export_tou = ',,,'
     # process list of report_data values (no TOU)
     for var in report_data:
-        wh = int(var['total'] * 1000)
+        wh = int(var['total'] * 1000) if var['total'] is not None else 0
         if var['variable'] == 'feedin':
             export_wh = wh 
             export = f"{wh},"
@@ -3602,10 +3615,12 @@ def get_pvoutput(d = None, tou = 0):
             generate = f"{wh},"
             power = f"{int(var['max'] * 1000)},{var['max_time']},"
         elif var['variable'] == 'feedinPower':
+            export_wh = wh if tou == 2 else export_wh
             calibrate = export_wh / wh if wh > 0.0 else 1.0
             export = f","
             export_tou = f"{int(peak * calibrate)},{int(off_peak * calibrate)},{int((wh - peak - off_peak) * calibrate)},0"
         elif var['variable'] == 'gridConsumptionPower':
+            grid_wh = wh if tou == 2 else grid_wh
             calibrate = grid_wh / wh if wh > 0.0 else 1.0
             grid = f"{int(peak * calibrate)},{int(off_peak * calibrate)},{int((wh - peak - off_peak) * calibrate)},0,"
         elif var['variable'] == 'loadsPower':
